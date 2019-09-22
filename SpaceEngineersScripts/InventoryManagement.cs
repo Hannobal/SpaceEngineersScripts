@@ -43,16 +43,23 @@ namespace Scripts
 
         };
 
-        string materialText="";
+        int listUpdateFrequency = 10;
+        int clearRefinereiesFrequency = 1;
+        int clearAssemblersFrequency = 10;
+        bool clearIngotsFromIdleAssemblers = true;
+
+        /**********************************************************************
+         * END OF CUSTOMIZATION SECTION
+         *********************************************************************/
+
+        string materialText = "";
         string componentText = "";
         string ammoText = "";
         string systemText = "";
         string debugText = "";
-        int listUpdateFrequency = 10;
+
         int listUpdateCounter = 0;
-        int clearRefinereiesFrequency = 1;
         int clearRefinereiesCounter = 0;
-        int clearAssemblersFrequency = 10;
         int clearAssemblersCounter = 0;
 
         Dictionary<ItemType, Dictionary<string, VRage.MyFixedPoint>> inventory
@@ -135,6 +142,22 @@ namespace Scripts
                 acceptorBits = GetAcceptorBits(container.CustomName);
 
             }
+
+            public bool Contains(MyItemType type)
+            {
+                IMyInventory inv = container.GetInventory();
+                List<MyInventoryItem> items = new List<MyInventoryItem>();
+                inv.GetItems(items);
+                foreach (MyInventoryItem item in items)
+                {
+                    if (item.Type == type)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
             public readonly IMyCargoContainer container;
             public readonly int acceptorBits;
         }
@@ -218,11 +241,11 @@ namespace Scripts
                         / (float) targetIngots[key];
                 }
 
-                materialText += String.Format("{0,-10}{1,8}{2,9}{3,4}\n",
+                materialText += String.Format("{0,-10}{1,8}{2,9} {3,6}\n",
                     key,
                     FormatNumber(ore),
                     FormatNumber(ingots),
-                    ratio.ToString());
+                    FormatNumber(ratio));
             }
         }
 
@@ -290,49 +313,53 @@ namespace Scripts
             };
         }
 
-        List<CargoContainer> FindCargoSpace(
+        void FindCargoSpace(
             MyInventoryItem item,
             IMyInventory currentInv,
-            List<CargoContainer> containers)
+            List<CargoContainer> inputContainers,
+            List<CargoContainer> output)
         {
+            //perfect match   contains item   sufficient space
+            //1               1                  1 = 7 (ideal)
+            //1               1                  0 = 6
+            //1               0                  1 = 5
+            //1               0                  0 = 4
+            //0               1                  1 = 3
+            //0               1                  0 = 2
+            //0               0                  1 = 1
+            //0               0                  0 = 0
             float itemVolume = ItemVolume(item);
-            List<CargoContainer> output = new List<CargoContainer>();
-            List<CargoContainer> containsItemAndEnoughRoom = new List<CargoContainer>();
-            List<CargoContainer> containsItemAndLimitedRoom = new List<CargoContainer>();
-            List<CargoContainer> doesntContainItemAndEnoughRoom = new List<CargoContainer>();
-            List<CargoContainer> doesntContainItemAndLimitedRoom = new List<CargoContainer>();
-            foreach (CargoContainer container in containers)
+            output.Clear();
+            Echo("CP0");
+            List<CargoContainer>[] sortLists = new List<CargoContainer>[8];
+            for (int i = 0; i < 8; ++i)
+                sortLists[i] = new List<CargoContainer>();
+            Echo("CP1");
+            foreach (CargoContainer container in inputContainers)
             {
-                if (0 == ((int) ParseType(item) & container.acceptorBits)) continue;
+                int parsedType = (int) ParseType(item);
+                if (0 == (parsedType & container.acceptorBits)) continue;
                 IMyInventory inv = container.container.GetInventory();
                 if (!currentInv.CanTransferItemTo(inv,item.Type)) continue;
                 float freeSpace = inv.MaxVolume.RawValue - inv.CurrentVolume.RawValue;
                 if (freeSpace == 0f) continue;
-                bool enoughRoom =  freeSpace < itemVolume;
-                bool containsItemType = false;
-                List<MyInventoryItem> items = new List<MyInventoryItem>();
-                inv.GetItems(items);
-                foreach (MyInventoryItem otherItem in items)
-                {
-                    if (item.Type == otherItem.Type)
-                    {
-                        containsItemType = true;
-                        break;
-                    }
-                }
-                if (containsItemType && enoughRoom)
-                    output.Add(container);
-                else if (containsItemType)
-                    containsItemAndLimitedRoom.Add(container);
-                else if (containsItemType)
-                    doesntContainItemAndEnoughRoom.Add(container);
-                else
-                    doesntContainItemAndLimitedRoom.Add(container);
+
+                int sortKey = 0;
+
+                if (freeSpace >= itemVolume)
+                    sortKey ^= 1;
+                if(container.Contains(item.Type))
+                    sortKey ^= 2;
+                if (parsedType == container.acceptorBits)
+                    // container ONLY accepts this type of Item (e.g. ores)
+                    sortKey ^= 4;
+                Echo("SortKey=" + sortKey.ToString());
+                sortLists[sortKey].Add(container);
             }
-            output.AddRange(containsItemAndLimitedRoom);
-            output.AddRange(doesntContainItemAndEnoughRoom);
-            output.AddRange(doesntContainItemAndLimitedRoom);
-            return output;
+
+            Echo("CPX");
+            for (int i=7; i>=0; --i)
+                output.AddRange(sortLists[i]);
         }
 
         void MoveToContainer(
@@ -341,8 +368,8 @@ namespace Scripts
             int itemIndex,
             List<CargoContainer> containers)
         {
-            List<CargoContainer> candidateContainers =
-                FindCargoSpace(item, currentInv, containers);
+            List<CargoContainer> candidateContainers = new List<CargoContainer>();
+            FindCargoSpace(item, currentInv, containers, candidateContainers);
             foreach(CargoContainer container in candidateContainers)
             {
                 IMyInventory targetInv = container.container.GetInventory();
@@ -361,6 +388,19 @@ namespace Scripts
             }
         }
 
+        void ClearAssemblers()
+        {
+            foreach (IMyAssembler assembler in assemblers)
+                ClearAssembler(assembler);
+        }
+        void ClearAssembler(IMyAssembler assembler)
+        {
+            ClearInventory(assembler.OutputInventory);
+            if (!clearIngotsFromIdleAssemblers) return;
+            if (assembler.IsProducing) return;
+            ClearInventory(assembler.InputInventory);
+        }
+
         void ClearRefineries()
         {
             foreach (IMyRefinery refinery in autoRefineries)
@@ -369,13 +409,15 @@ namespace Scripts
         void ClearRefinery(IMyRefinery refinery)
         {
             for(int i=0; i<refinery.InventoryCount; ++i)
+                ClearInventory(refinery.GetInventory(i));
+        }
+
+        void ClearInventory(IMyInventory inv)
+        {
+            for (int j = inv.ItemCount - 1; j >= 0; --j)
             {
-                IMyInventory inv = refinery.GetInventory(i);
-                for(int j=inv.ItemCount-1; j>=0; --j)
-                {
-                    MyInventoryItem item = (MyInventoryItem) inv.GetItemAt(j);
-                    MoveToContainer(item, inv, j, cargoContainers[Me.CubeGrid]);
-                }
+                MyInventoryItem item = (MyInventoryItem)inv.GetItemAt(j);
+                MoveToContainer(item, inv, j, cargoContainers[Me.CubeGrid]);
             }
         }
 
@@ -391,12 +433,12 @@ namespace Scripts
                 RebuildBlockLists();
 
             clearRefinereiesCounter = (++clearRefinereiesCounter % clearRefinereiesFrequency);
-            Echo(clearRefinereiesCounter.ToString());
             if (clearRefinereiesCounter == 0)
-            {
-                Echo("Clear Ref");
                 ClearRefineries();
-            }
+
+            clearAssemblersCounter = (++clearAssemblersCounter % clearAssemblersFrequency);
+            if (clearAssemblersCounter == 0)
+                ClearAssemblers();
 
             UpdateInventory();
             UpdateMaterialText();
