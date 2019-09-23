@@ -78,6 +78,21 @@ namespace Scripts
         List<IMyRefinery> autoRefineries = new List<IMyRefinery>();
         List<IMyAssembler> assemblers = new List<IMyAssembler>();
 
+        // splits a string by whitespace except for parts in double quotes
+        List<string> SplitWhitespace(string str, bool IgnoreInts = false)
+        {
+            List<string> Parts = new List<string>();
+            var Matches = System.Text.RegularExpressions.Regex.Matches(str, @"[\""].+?[\""]|[^ ]+");
+            for (int i = 0; i < Matches.Count; i++)
+            {
+                string m = Matches[i].Groups[0].Captures[0].ToString();
+                int j;
+                if (IgnoreInts && Int32.TryParse(m, out j) == true) continue;
+                Parts.Add(m.Replace("\"", ""));
+            }
+            return Parts;
+        }
+
         string FormatNumber(float num)
         {
             if(num < 1e3f)
@@ -362,6 +377,18 @@ namespace Scripts
                 output.AddRange(sortLists[i]);
         }
 
+        bool CheckFilterMatch(MyItemType type, List<string> filter)
+        {
+            if (filter == null) return true;
+            if (filter.Count == 0) return true;
+            for (int i = 0; i < filter.Count; i++)
+            {
+                if (type.TypeId.Contains(filter[i])) return true;
+                if (type.SubtypeId.Contains(filter[i])) return true;
+            }
+            return false;
+        }
+
         void MoveToContainer(
             MyInventoryItem item,
             IMyInventory currentInv,
@@ -388,6 +415,29 @@ namespace Scripts
             }
         }
 
+        void clearAllInventories(
+            IMyCubeGrid sourceGrid,
+            IMyCubeGrid targetGrid,
+            List<string> filter)
+        {
+            List<IMyTerminalBlock> blocks = new List<IMyTerminalBlock>();
+            GridTerminalSystem.GetBlocksOfType<IMyTerminalBlock>(blocks,
+                x => x.HasInventory&& x.CubeGrid == sourceGrid);
+            foreach (var block in blocks)
+            {
+                if (block is IMyReactor) continue;
+                if (block is IMyGasGenerator) continue;
+                if (block is IMySmallMissileLauncher) continue;
+                if (block is IMySmallMissileLauncherReload) continue;
+                if (block is IMySmallGatlingGun) continue;
+                if (block is IMyLargeTurretBase) continue;
+                for (int i=0; i<block.InventoryCount; ++i)
+                {
+                    ClearInventory(block.GetInventory(i), targetGrid, filter);
+                }
+            }
+        }
+
         void ClearAssemblers()
         {
             foreach (IMyAssembler assembler in assemblers)
@@ -395,10 +445,10 @@ namespace Scripts
         }
         void ClearAssembler(IMyAssembler assembler)
         {
-            ClearInventory(assembler.OutputInventory);
+            ClearInventory(assembler.OutputInventory, assembler.CubeGrid);
             if (!clearIngotsFromIdleAssemblers) return;
             if (assembler.IsProducing) return;
-            ClearInventory(assembler.InputInventory);
+            ClearInventory(assembler.InputInventory, assembler.CubeGrid);
         }
 
         void ClearRefineries()
@@ -409,24 +459,66 @@ namespace Scripts
         void ClearRefinery(IMyRefinery refinery)
         {
             for(int i=0; i<refinery.InventoryCount; ++i)
-                ClearInventory(refinery.GetInventory(i));
+                ClearInventory(refinery.GetInventory(i), refinery.CubeGrid);
         }
 
-        void ClearInventory(IMyInventory inv)
+        void ClearInventory(
+            IMyInventory inv,
+            IMyCubeGrid targetGrid,
+            List<string> filter = null)
         {
             for (int j = inv.ItemCount - 1; j >= 0; --j)
             {
                 MyInventoryItem item = (MyInventoryItem)inv.GetItemAt(j);
-                MoveToContainer(item, inv, j, cargoContainers[Me.CubeGrid]);
+                if (!CheckFilterMatch(item.Type, filter)) continue;
+                MoveToContainer(item, inv, j, cargoContainers[targetGrid]);
             }
         }
+        void PushPullCargo(List<string> args)
+        {
+            // args[0] = "Push"/"Pull"
+            // args[1] = connector name
+            // args[2] = filter
+            if (args.Count < 2 || args.Count > 3)
+            {
+                debugText = "Error: wrong syntax for command \""+args[0]+"\":\n";
+                debugText += args[0]+" <Connector Name> [Filter]";
+                return;
+            }
+            if (args.Count == 2) args.Add(""); // empty filter
 
+            IMyShipConnector connector = GridTerminalSystem.GetBlockWithName(args[1]) as IMyShipConnector;
+            if(connector == null)
+            {
+                debugText = "Error: no ship connector named \"" + args[1] + "\" found\n";
+                return;
+            }
+            if(connector.Status != MyShipConnectorStatus.Connected)
+            {
+                debugText = "Error: ship connector named \"" + args[1] + "\" is not connected\n";
+                return;
+            }
+
+            IMyCubeGrid fromGrid, toGrid;
+            if (args[0] == "Push")
+            {
+                toGrid = connector.OtherConnector.CubeGrid;
+                fromGrid = connector.CubeGrid;
+            }
+            else
+            {
+                fromGrid = connector.OtherConnector.CubeGrid;
+                toGrid = connector.CubeGrid;
+            }
+            List<string> filter = SplitWhitespace(args[2]);
+            clearAllInventories(fromGrid, toGrid, filter);
+        }
         Program() {
             RebuildBlockLists();
             Runtime.UpdateFrequency = UpdateFrequency.Update100;
         }
 
-        void Main(string arguments)
+        void Update()
         {
             listUpdateCounter = (++listUpdateCounter % listUpdateFrequency);
             if (listUpdateCounter == 0)
@@ -443,6 +535,29 @@ namespace Scripts
             UpdateInventory();
             UpdateMaterialText();
             UpdateTextPanels();
+        }
+
+        void ParseArguments(string arguments)
+        {
+            List<string> args = SplitWhitespace(arguments);
+            if (args.Count == 0)
+            {
+                debugText = "Error: empty command";
+                return;
+            }
+            if (args[0] == "Pull" || args[0] == "Push")
+            {
+                PushPullCargo(args);
+            }
+
+        }
+
+        void Main(string arguments)
+        {
+            if (arguments.Length != 0)
+                ParseArguments(arguments);
+            else
+                Update();
         }
 
         #region post_script
