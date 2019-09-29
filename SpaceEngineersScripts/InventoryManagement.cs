@@ -20,36 +20,7 @@ namespace Scripts
     {
         #endregion pre_script
 
-        VRage.MyFixedPoint MaxAutoRefineryOreAmount = 10000;
-
-        // do not change the following variables:
-        static readonly string oreType = "MyObjectBuilder_Ore";
-        static readonly string ingotType = "MyObjectBuilder_Ingot";
-        static readonly string componentType = "MyObjectBuilder_Component";
-        static readonly string ammoType = "MyObjectBuilder_AmmoMagazine";
-
-        readonly Dictionary<string, Dictionary<string, VRage.MyFixedPoint>> targetAmounts
-            = new Dictionary<string, Dictionary<string, VRage.MyFixedPoint>>
-    {
-        // here you can set the amounts to be produced
-        { ingotType, new Dictionary<string, VRage.MyFixedPoint> {
-            { "Cobalt",      200 },
-            { "Gold",        200 },
-            { "Iron",      10000 },
-            { "Magnesium",   100 },
-            { "Nickel",      600 },
-            { "Platinum",    100 },
-            { "Silicon",    1000 },
-            { "Silver",     1000 },
-            { "Stone",      1000 },
-            { "Uranium",     100 },
-        } },
-        { componentType, new Dictionary<string, VRage.MyFixedPoint> {
-            { "Superconductor",      100 },
-        } },
-        { ammoType, new Dictionary<string, VRage.MyFixedPoint> {
-        } }
-    };
+        VRage.MyFixedPoint maxAutoRefineryOreAmount = 10000;
 
         readonly int listUpdateFrequency = 10;
         readonly int clearRefinereiesFrequency = 1;
@@ -59,6 +30,11 @@ namespace Scripts
         /**********************************************************************
          * END OF CUSTOMIZATION SECTION
          *********************************************************************/
+        
+        static readonly string oreType = "MyObjectBuilder_Ore";
+        static readonly string ingotType = "MyObjectBuilder_Ingot";
+        static readonly string componentType = "MyObjectBuilder_Component";
+        static readonly string ammoType = "MyObjectBuilder_AmmoMagazine";
 
         class ItemInInventory
         {
@@ -73,21 +49,56 @@ namespace Scripts
 
         class InventorySlot
         {
-            public VRage.MyFixedPoint targetAmount = 0;
-            public VRage.MyFixedPoint totalAmount = 0;
-            public float ratio = 1f;
-            public List<ItemInInventory> items = new List<ItemInInventory>();
+
+            private VRage.MyFixedPoint targetAmount = 0;
+            private VRage.MyFixedPoint totalAmount = 0;
+            private VRage.MyFixedPoint cargoAmount = 0;
+
+            public VRage.MyFixedPoint TargetAmount
+            {
+                get { return targetAmount; }
+            }
+            public VRage.MyFixedPoint TotalAmount
+            {
+                get { return totalAmount; }
+            }
+            public VRage.MyFixedPoint CargoAmount
+            {
+                get { return cargoAmount; }
+            }
+            public float Ratio
+            {
+                get {
+                    if (targetAmount > 0)
+                        return (float)totalAmount / (float)targetAmount;
+                    else
+                        return 1.0f;
+                }
+            }
             public void Clear()
             {
-                items.Clear();
                 totalAmount = 0;
-                ratio = 1f;
+                cargoAmount = 0;
+            }
+            public void AddAmount(VRage.MyFixedPoint amount)
+            {
+                totalAmount += amount;
+            }
+            public void AddCargoAmount(VRage.MyFixedPoint amount)
+            {
+                cargoAmount += amount;
+            }
+
+            public void AddTargetAmount(VRage.MyFixedPoint amount)
+            {
+                targetAmount += amount;
             }
         };
 
         Dictionary<string, Dictionary<string, InventorySlot>> globalInventory =
             new Dictionary<string, Dictionary<string, InventorySlot>>();
 
+        string autoRefineryMaterial = "";
         string materialText = "";
         string componentText = "";
         string ammoText = "";
@@ -103,6 +114,7 @@ namespace Scripts
             = new Dictionary<IMyCubeGrid, List<CargoContainer>>();
         List<IMyRefinery> autoRefineries = new List<IMyRefinery>();
         List<IMyAssembler> assemblers = new List<IMyAssembler>();
+        SortedSet<string> availableMaterials = new SortedSet<string>();
 
         // splits a string by whitespace except for parts in double quotes
         List<string> SplitWhitespace(string str, bool IgnoreInts = false)
@@ -205,29 +217,50 @@ namespace Scripts
 
         void ClearGlobalInventory()
         {
+            globalInventory.Clear();
             // we only clear the amounts
-            foreach(var kvp in globalInventory)
-            {
-                foreach(var kvp2 in kvp.Value)
-                {
+            //foreach(var kvp in globalInventory)
+            //{
+            //    foreach(var kvp2 in kvp.Value)
+            //    {
+            //        kvp2.Value.totalAmount = 0;
+            //        kvp2.Value.targetAmount = 0;
+            //        kvp2.Value.ratio = 0f;
+            //    }
+            //}
+        }
 
-                }
+        bool CheckGlobalInventorySlot(
+            string TypeId,
+            string SubtypeId)
+        {
+            if (!globalInventory.ContainsKey(TypeId))
+                return false;
+            if (!globalInventory[TypeId].ContainsKey(SubtypeId))
+                return false;
+            return true;
+        }
+
+        void AddGlobalInventorySlot(
+            string TypeId,
+            string SubtypeId)
+        {
+            if (!globalInventory.ContainsKey(TypeId))
+            {
+                globalInventory.Add(TypeId, new Dictionary<string, InventorySlot>());
+                globalInventory[TypeId].Add(SubtypeId, new InventorySlot());
             }
+            else if (!globalInventory[TypeId].ContainsKey(SubtypeId))
+                globalInventory[TypeId].Add(SubtypeId, new InventorySlot());
         }
 
         void AddToGlobalInventory(
-            IMyInventory inventory,
-            MyInventoryItem item,
-            int itemIndex)
+            MyInventoryItem item, bool isInCargo)
         {
-            if (!globalInventory.ContainsKey(item.Type.TypeId))
-                globalInventory.Add(item.Type.TypeId, new Dictionary<string, InventorySlot>());
-            if (!globalInventory[item.Type.TypeId].ContainsKey(item.Type.SubtypeId))
-                globalInventory[item.Type.TypeId].Add(item.Type.SubtypeId, new InventorySlot());
-
-            globalInventory[item.Type.TypeId][item.Type.SubtypeId].totalAmount += item.Amount;
-            globalInventory[item.Type.TypeId][item.Type.SubtypeId].items.Add(
-                new ItemInInventory(inventory, itemIndex));
+            AddGlobalInventorySlot(item.Type.TypeId, item.Type.SubtypeId);
+            globalInventory[item.Type.TypeId][item.Type.SubtypeId].AddAmount(item.Amount);
+            if(isInCargo)
+                globalInventory[item.Type.TypeId][item.Type.SubtypeId].AddCargoAmount(item.Amount);
         }
 
         void AddToGlobalInventory(
@@ -235,19 +268,13 @@ namespace Scripts
             string SubtypeId,
             VRage.MyFixedPoint targetAmount)
         {
-            if (!globalInventory.ContainsKey(TypeId))
-                globalInventory.Add(TypeId, new Dictionary<string, InventorySlot>());
-            if (!globalInventory[TypeId].ContainsKey(SubtypeId))
-                globalInventory[TypeId].Add(SubtypeId, new InventorySlot());
-
-            globalInventory[TypeId][SubtypeId].targetAmount += targetAmount;
+            AddGlobalInventorySlot(TypeId, SubtypeId);
+            globalInventory[TypeId][SubtypeId].AddTargetAmount(targetAmount);
         }
 
         void UpdateTextPanels()
         {
             foreach (IMyTextPanel panel in textPanels) {
-                Echo("Test");
-                Echo(panel.CustomName);
                 if (panel.CustomName.Contains("Material"))
                 {
                     panel.WriteText(materialText);
@@ -291,52 +318,43 @@ namespace Scripts
             );
         }
 
+        void BuildMaterialsList()
+        {
+            availableMaterials.Clear();
+            if (globalInventory.ContainsKey(oreType))
+                foreach (var kvp in globalInventory[oreType])
+                    availableMaterials.Add(kvp.Key);
+            if (globalInventory.ContainsKey(ingotType))
+                foreach (var kvp in globalInventory[ingotType])
+                    availableMaterials.Add(kvp.Key);
+            // sync dictionaries for ores and ingots:
+            foreach (string material in availableMaterials)
+            {
+                AddGlobalInventorySlot(oreType, material);
+                AddGlobalInventorySlot(ingotType, material);
+            }
+        }
+
         void UpdateMaterialText()
         {
             materialText = String.Format("{0,-10}{1,8}{2,9}\n", "Material", "Ore ", "Refined ");
-            SortedSet<string> keys = new SortedSet<string>();
-            if(globalInventory.ContainsKey(oreType))
-                foreach(var kvp in globalInventory[oreType])
-                    keys.Add(kvp.Key);
-            if (globalInventory.ContainsKey(ingotType))
-                foreach (var kvp in globalInventory[ingotType])
-                    keys.Add(kvp.Key);
-            foreach (string key in keys)
+            foreach (string key in availableMaterials)
             {
-                float ore = 0f;
-                float ingots = 0f;
-                float ratio = 1f;
-                if (globalInventory[oreType].ContainsKey(key))
-                    ore = (float)globalInventory[oreType][key].totalAmount;
-
-                if (globalInventory[ingotType].ContainsKey(key))
-                    ingots = (float) globalInventory[ingotType][key].totalAmount;
-                if (globalInventory[ingotType].ContainsKey(key)
-                    && globalInventory[ingotType][key].targetAmount > 0)
-                {
-                    ratio = ingots
-                        / (float)globalInventory[ingotType][key].targetAmount;
-                }
 
                 materialText += String.Format("{0,-10}{1,8}{2,9} {3,6}\n",
                     key,
-                    FormatNumber(ore),
-                    FormatNumber(ingots),
-                    FormatNumber(ratio));
+                    FormatNumber((float)globalInventory[oreType][key].TotalAmount),
+                    FormatNumber((float)globalInventory[ingotType][key].TotalAmount),
+                    FormatNumber(globalInventory[ingotType][key].Ratio));
             }
+            if (autoRefineryMaterial != "")
+                materialText += "Automatic refineries processing " + autoRefineryMaterial +"\n";
         }
 
         void UpdateInventory()
         {
-            // clear inventory
-            foreach (var entry in globalInventory)
-            {
-                foreach (var entry2 in entry.Value)
-                {
-                    entry2.Value.items.Clear();
-                    entry2.Value.totalAmount = 0;
-                }
-            }
+            ClearGlobalInventory();
+            AddTargetAmountsToGlobalInventory();
             List<IMyTerminalBlock> blocks = new List<IMyTerminalBlock>();
             GridTerminalSystem.GetBlocks(blocks);
             foreach (IMyTerminalBlock block in blocks)
@@ -358,21 +376,62 @@ namespace Scripts
                 IMyInventory inventory = block.GetInventory(i);
                 List<MyInventoryItem> items = new List<MyInventoryItem>();
                 inventory.GetItems(items);
-                for(int j=0; j<items.Count;j++)
+                foreach (MyInventoryItem item in items)
                 {
-                    if (!globalInventory.ContainsKey(items[j].Type.TypeId))
-                    {
-                        globalInventory.Add(items[j].Type.TypeId, new Dictionary<string, InventorySlot>());
-                        globalInventory[items[j].Type.TypeId].Add(items[j].Type.SubtypeId, new InventorySlot());
-                    }
-                    else if (!globalInventory[items[j].Type.TypeId].ContainsKey(items[j].Type.SubtypeId))
-                        globalInventory[items[j].Type.TypeId].Add(items[j].Type.SubtypeId, new InventorySlot());
+                    AddToGlobalInventory(item, isCargo);
+                }
+            }
+            BuildMaterialsList();
+        }
 
-                    globalInventory[items[j].Type.TypeId][items[j].Type.SubtypeId].totalAmount += items[j].Amount;
-                    if(isCargo)
+        void AddTargetAmountsToGlobalInventory()
+        {
+            string[] lines = Me.CustomData.Split(
+                new[] { "\r\n", "\r", "\n" },
+                StringSplitOptions.None
+            );
+            string type = "";
+            for (int lineNo = 0; lineNo < lines.Length; ++lineNo)
+            {
+                string line = lines[lineNo].Trim();
+                if (line.Length == 0) continue;
+                if (line[0] == '#') continue;
+                List<string> words = SplitWhitespace(line);
+                if (words.Count == 1)
+                {
+                    string lowerWord = words[0].ToLower();
+                    if (lowerWord.Contains("ingot"))
+                        type = ingotType;
+                    else if (lowerWord.Contains("component"))
+                        type = componentType;
+                    else if (lowerWord.Contains("ammo"))
+                        type = ammoType;
+                    else
+                        type = words[0];
+                }
+                else if (words.Count == 2)
+                {
+                    if (type.Length == 0)
                     {
-                        globalInventory[items[j].Type.TypeId][items[j].Type.SubtypeId].items.Add(new ItemInInventory(inventory,j));
+                        Echo("syntax error on line " + lineNo.ToString() + " of Custom Data: "
+                            + " No type defined before Subtype");
                     }
+                    else
+                    {
+                        int amount;
+                        if (int.TryParse(words[1], out amount)) {
+                            AddToGlobalInventory(type, words[0], amount);
+                        }
+                        else
+                        {
+                            Echo("syntax error on line " + lineNo.ToString() + " of Custom Data" +
+                                "Could not parse " + words[1] + " as integer");
+                        }
+                    }
+                }
+                else
+                {
+                    Echo("syntax error on line " + lineNo.ToString() + " of Custom Data");
                 }
             }
         }
@@ -407,11 +466,9 @@ namespace Scripts
             //0               0                  0 = 0
             float itemVolume = ItemVolume(item);
             output.Clear();
-            Echo("CP0");
             List<CargoContainer>[] sortLists = new List<CargoContainer>[8];
             for (int i = 0; i < 8; ++i)
                 sortLists[i] = new List<CargoContainer>();
-            Echo("CP1");
             foreach (CargoContainer container in inputContainers)
             {
                 int parsedType = (int) ParseType(item);
@@ -430,11 +487,9 @@ namespace Scripts
                 if (parsedType == container.acceptorBits)
                     // container ONLY accepts this type of Item (e.g. ores)
                     sortKey ^= 4;
-                Echo("SortKey=" + sortKey.ToString());
                 sortLists[sortKey].Add(container);
             }
 
-            Echo("CPX");
             for (int i=7; i>=0; --i)
                 output.AddRange(sortLists[i]);
         }
@@ -515,7 +570,67 @@ namespace Scripts
 
         void FillRefineries()
         {
+            autoRefineryMaterial = "";
+            if (autoRefineries.Count == 0) return;
+            // first find the material wich needs to be refined
+            float minRatio = 999999.9f;
+            foreach(string material in availableMaterials)
+            {
+                if (globalInventory[oreType][material].CargoAmount == 0)
+                    continue;
+                if (globalInventory[ingotType][material].TargetAmount == 0)
+                    continue;
+                float ratio = globalInventory[ingotType][material].Ratio;
+                if (ratio<minRatio)
+                {
+                    minRatio = ratio;
+                    autoRefineryMaterial = material;
+                }
+            }
+            if (autoRefineryMaterial == "")
+                return;
 
+            VRage.MyFixedPoint amountPerRef =
+                globalInventory[oreType][autoRefineryMaterial].CargoAmount;
+            amountPerRef.RawValue /= autoRefineries.Count;
+            if (amountPerRef > maxAutoRefineryOreAmount)
+                amountPerRef = maxAutoRefineryOreAmount;
+
+            foreach (var refinery in autoRefineries)
+                MoveItemFromStorageToInventory(
+                    new MyItemType(oreType, autoRefineryMaterial),
+                    refinery.GetInventory(0),
+                    amountPerRef);
+        }
+
+        void MoveItemFromStorageToInventory(
+            MyItemType type,
+            IMyInventory targetInv,
+            VRage.MyFixedPoint amount
+            )
+        {
+            VRage.MyFixedPoint remainingAmount = amount;
+            foreach(CargoContainer container in cargoContainers[Me.CubeGrid])
+            {
+                IMyInventory inventory = container.container.GetInventory();
+                if (!inventory.IsConnectedTo(targetInv)) continue;
+
+                for (int i = 0; i < inventory.ItemCount; ++i)
+                {
+                    MyInventoryItem item = (MyInventoryItem) inventory.GetItemAt(i);
+                    if (item.Type != type) continue;
+                    if (!inventory.CanTransferItemTo(targetInv, item.Type))
+                        continue;
+                    VRage.MyFixedPoint transferrableAmount = remainingAmount;
+                    if (item.Amount < transferrableAmount)
+                        transferrableAmount = item.Amount;
+                    if(inventory.TransferItemTo(targetInv, item, transferrableAmount))
+                    {
+                        remainingAmount -= transferrableAmount;
+                        if (remainingAmount == 0) return;
+                    }
+                }
+            }
         }
 
         void ClearRefineries()
@@ -593,16 +708,17 @@ namespace Scripts
 
             clearRefinereiesCounter = (++clearRefinereiesCounter % clearRefinereiesFrequency);
             if (clearRefinereiesCounter == 0)
-            {
                 ClearRefineries();
-                FillRefineries();
-            }
 
             clearAssemblersCounter = (++clearAssemblersCounter % clearAssemblersFrequency);
             if (clearAssemblersCounter == 0)
                 ClearAssemblers();
 
             UpdateInventory();
+
+            if (clearRefinereiesCounter == 0)
+                FillRefineries();
+
             UpdateMaterialText();
             UpdateTextPanels();
         }
