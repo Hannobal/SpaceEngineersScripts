@@ -22,9 +22,17 @@ namespace Scripts
 
         VRage.MyFixedPoint MaxAutoRefineryOreAmount = 10000;
 
-        readonly Dictionary<string, VRage.MyFixedPoint> targetIngots
-            = new Dictionary<string, VRage.MyFixedPoint>
-        {
+        // do not change the following variables:
+        static readonly string oreType = "MyObjectBuilder_Ore";
+        static readonly string ingotType = "MyObjectBuilder_Ingot";
+        static readonly string componentType = "MyObjectBuilder_Component";
+        static readonly string ammoType = "MyObjectBuilder_AmmoMagazine";
+
+        readonly Dictionary<string, Dictionary<string, VRage.MyFixedPoint>> targetAmounts
+            = new Dictionary<string, Dictionary<string, VRage.MyFixedPoint>>
+    {
+        // here you can set the amounts to be produced
+        { ingotType, new Dictionary<string, VRage.MyFixedPoint> {
             { "Cobalt",      200 },
             { "Gold",        200 },
             { "Iron",      10000 },
@@ -35,22 +43,50 @@ namespace Scripts
             { "Silver",     1000 },
             { "Stone",      1000 },
             { "Uranium",     100 },
-        };
+        } },
+        { componentType, new Dictionary<string, VRage.MyFixedPoint> {
+            { "Superconductor",      100 },
+        } },
+        { ammoType, new Dictionary<string, VRage.MyFixedPoint> {
+        } }
+    };
 
-        readonly Dictionary<string, VRage.MyFixedPoint> targetComponents
-            = new Dictionary<string, VRage.MyFixedPoint>
-        {
-
-        };
-
-        int listUpdateFrequency = 10;
-        int clearRefinereiesFrequency = 1;
-        int clearAssemblersFrequency = 10;
-        bool clearIngotsFromIdleAssemblers = true;
+        readonly int listUpdateFrequency = 10;
+        readonly int clearRefinereiesFrequency = 1;
+        readonly int clearAssemblersFrequency = 10;
+        readonly bool clearIngotsFromIdleAssemblers = true;
 
         /**********************************************************************
          * END OF CUSTOMIZATION SECTION
          *********************************************************************/
+
+        class ItemInInventory
+        {
+            public ItemInInventory(IMyInventory inv, int itemIdx)
+            {
+                inventory = inv;
+                itemIndex = itemIdx;
+            }
+            public IMyInventory inventory;
+            public int itemIndex;
+        }
+
+        class InventorySlot
+        {
+            public VRage.MyFixedPoint targetAmount = 0;
+            public VRage.MyFixedPoint totalAmount = 0;
+            public float ratio = 1f;
+            public List<ItemInInventory> items = new List<ItemInInventory>();
+            public void Clear()
+            {
+                items.Clear();
+                totalAmount = 0;
+                ratio = 1f;
+            }
+        };
+
+        Dictionary<string, Dictionary<string, InventorySlot>> globalInventory =
+            new Dictionary<string, Dictionary<string, InventorySlot>>();
 
         string materialText = "";
         string componentText = "";
@@ -61,16 +97,6 @@ namespace Scripts
         int listUpdateCounter = 0;
         int clearRefinereiesCounter = 0;
         int clearAssemblersCounter = 0;
-
-        Dictionary<ItemType, Dictionary<string, VRage.MyFixedPoint>> inventory
-            = new Dictionary<ItemType, Dictionary<string, VRage.MyFixedPoint>>
-            {
-                { ItemType.Ore, new Dictionary<string, VRage.MyFixedPoint>() },
-                { ItemType.Ingot, new Dictionary<string, VRage.MyFixedPoint>() },
-                { ItemType.Component, new Dictionary<string, VRage.MyFixedPoint>() },
-                { ItemType.Ammunition, new Dictionary<string, VRage.MyFixedPoint>() },
-                { ItemType.Other, new Dictionary<string, VRage.MyFixedPoint>() }
-            };
 
         List<IMyTextPanel> textPanels = new List<IMyTextPanel>();
         Dictionary<IMyCubeGrid, List<CargoContainer>> cargoContainers
@@ -177,6 +203,46 @@ namespace Scripts
             public readonly int acceptorBits;
         }
 
+        void ClearGlobalInventory()
+        {
+            // we only clear the amounts
+            foreach(var kvp in globalInventory)
+            {
+                foreach(var kvp2 in kvp.Value)
+                {
+
+                }
+            }
+        }
+
+        void AddToGlobalInventory(
+            IMyInventory inventory,
+            MyInventoryItem item,
+            int itemIndex)
+        {
+            if (!globalInventory.ContainsKey(item.Type.TypeId))
+                globalInventory.Add(item.Type.TypeId, new Dictionary<string, InventorySlot>());
+            if (!globalInventory[item.Type.TypeId].ContainsKey(item.Type.SubtypeId))
+                globalInventory[item.Type.TypeId].Add(item.Type.SubtypeId, new InventorySlot());
+
+            globalInventory[item.Type.TypeId][item.Type.SubtypeId].totalAmount += item.Amount;
+            globalInventory[item.Type.TypeId][item.Type.SubtypeId].items.Add(
+                new ItemInInventory(inventory, itemIndex));
+        }
+
+        void AddToGlobalInventory(
+            string TypeId,
+            string SubtypeId,
+            VRage.MyFixedPoint targetAmount)
+        {
+            if (!globalInventory.ContainsKey(TypeId))
+                globalInventory.Add(TypeId, new Dictionary<string, InventorySlot>());
+            if (!globalInventory[TypeId].ContainsKey(SubtypeId))
+                globalInventory[TypeId].Add(SubtypeId, new InventorySlot());
+
+            globalInventory[TypeId][SubtypeId].targetAmount += targetAmount;
+        }
+
         void UpdateTextPanels()
         {
             foreach (IMyTextPanel panel in textPanels) {
@@ -228,32 +294,28 @@ namespace Scripts
         void UpdateMaterialText()
         {
             materialText = String.Format("{0,-10}{1,8}{2,9}\n", "Material", "Ore ", "Refined ");
-            if(inventory.Count ==0 )
-            {
-                materialText += "No ores or ingots found.";
-                return;
-            }
             SortedSet<string> keys = new SortedSet<string>();
-            foreach(var kvp in inventory[ItemType.Ore])
-                keys.Add(kvp.Key);
-            foreach (var kvp in inventory[ItemType.Ingot])
-                keys.Add(kvp.Key);
-            foreach (var kvp in targetIngots)
-                keys.Add(kvp.Key);
+            if(globalInventory.ContainsKey(oreType))
+                foreach(var kvp in globalInventory[oreType])
+                    keys.Add(kvp.Key);
+            if (globalInventory.ContainsKey(ingotType))
+                foreach (var kvp in globalInventory[ingotType])
+                    keys.Add(kvp.Key);
             foreach (string key in keys)
             {
                 float ore = 0f;
                 float ingots = 0f;
                 float ratio = 1f;
-                if (inventory[ItemType.Ore].ContainsKey(key))
-                    ore = (float)inventory[ItemType.Ore][key];
+                if (globalInventory[oreType].ContainsKey(key))
+                    ore = (float)globalInventory[oreType][key].totalAmount;
 
-                if (inventory[ItemType.Ingot].ContainsKey(key))
-                    ingots = (float) inventory[ItemType.Ingot][key];
-                if (targetIngots.ContainsKey(key) && targetIngots[key] > 0)
+                if (globalInventory[ingotType].ContainsKey(key))
+                    ingots = (float) globalInventory[ingotType][key].totalAmount;
+                if (globalInventory[ingotType].ContainsKey(key)
+                    && globalInventory[ingotType][key].targetAmount > 0)
                 {
                     ratio = ingots
-                        / (float) targetIngots[key];
+                        / (float)globalInventory[ingotType][key].targetAmount;
                 }
 
                 materialText += String.Format("{0,-10}{1,8}{2,9} {3,6}\n",
@@ -267,9 +329,13 @@ namespace Scripts
         void UpdateInventory()
         {
             // clear inventory
-            foreach (var entry in inventory)
+            foreach (var entry in globalInventory)
             {
-                entry.Value.Clear();
+                foreach (var entry2 in entry.Value)
+                {
+                    entry2.Value.items.Clear();
+                    entry2.Value.totalAmount = 0;
+                }
             }
             List<IMyTerminalBlock> blocks = new List<IMyTerminalBlock>();
             GridTerminalSystem.GetBlocks(blocks);
@@ -286,33 +352,29 @@ namespace Scripts
 
         void UpdateInventory(IMyTerminalBlock block)
         {
-            //Echo(block.CustomName);
+            bool isCargo = (block is IMyCargoContainer);
             for (int i=0;i<block.InventoryCount;++i)
             {
-                UpdateInventory(block.GetInventory(i));
-            }
-        }
+                IMyInventory inventory = block.GetInventory(i);
+                List<MyInventoryItem> items = new List<MyInventoryItem>();
+                inventory.GetItems(items);
+                for(int j=0; j<items.Count;j++)
+                {
+                    if (!globalInventory.ContainsKey(items[j].Type.TypeId))
+                    {
+                        globalInventory.Add(items[j].Type.TypeId, new Dictionary<string, InventorySlot>());
+                        globalInventory[items[j].Type.TypeId].Add(items[j].Type.SubtypeId, new InventorySlot());
+                    }
+                    else if (!globalInventory[items[j].Type.TypeId].ContainsKey(items[j].Type.SubtypeId))
+                        globalInventory[items[j].Type.TypeId].Add(items[j].Type.SubtypeId, new InventorySlot());
 
-        void UpdateInventory(IMyInventory inventory)
-        {
-            //Echo("inv "+" "+ inventory.CurrentVolume.RawValue.ToString() +"/"+ inventory.MaxVolume.RawValue.ToString());
-            List<MyInventoryItem> items = new List<MyInventoryItem>();
-            inventory.GetItems(items);
-            foreach (MyInventoryItem item in items)
-            {
-                UpdateInventory(item);
+                    globalInventory[items[j].Type.TypeId][items[j].Type.SubtypeId].totalAmount += items[j].Amount;
+                    if(isCargo)
+                    {
+                        globalInventory[items[j].Type.TypeId][items[j].Type.SubtypeId].items.Add(new ItemInInventory(inventory,j));
+                    }
+                }
             }
-        }
-
-        void UpdateInventory(MyInventoryItem item)
-        {
-            ItemType type = ParseType(item);
-            Dictionary<string, VRage.MyFixedPoint> inv = inventory[type];
-            if (!inv.ContainsKey(item.Type.SubtypeId))
-                inv.Add(item.Type.SubtypeId, 0);
-            inv[item.Type.SubtypeId] += item.Amount;
-            //Echo("vol="+(item.Amount.RawValue*item.Type.GetItemInfo().Volume).ToString());
-            Echo("amt="+item.Amount.ToString());
         }
 
         float ItemVolume(MyInventoryItem item)
@@ -415,7 +477,7 @@ namespace Scripts
             }
         }
 
-        void clearAllInventories(
+        void ClearAllInventories(
             IMyCubeGrid sourceGrid,
             IMyCubeGrid targetGrid,
             List<string> filter)
@@ -449,6 +511,11 @@ namespace Scripts
             if (!clearIngotsFromIdleAssemblers) return;
             if (assembler.IsProducing) return;
             ClearInventory(assembler.InputInventory, assembler.CubeGrid);
+        }
+
+        void FillRefineries()
+        {
+
         }
 
         void ClearRefineries()
@@ -511,7 +578,7 @@ namespace Scripts
                 toGrid = connector.CubeGrid;
             }
             List<string> filter = SplitWhitespace(args[2]);
-            clearAllInventories(fromGrid, toGrid, filter);
+            ClearAllInventories(fromGrid, toGrid, filter);
         }
         Program() {
             RebuildBlockLists();
@@ -526,7 +593,10 @@ namespace Scripts
 
             clearRefinereiesCounter = (++clearRefinereiesCounter % clearRefinereiesFrequency);
             if (clearRefinereiesCounter == 0)
+            {
                 ClearRefineries();
+                FillRefineries();
+            }
 
             clearAssemblersCounter = (++clearAssemblersCounter % clearAssemblersFrequency);
             if (clearAssemblersCounter == 0)
@@ -549,7 +619,10 @@ namespace Scripts
             {
                 PushPullCargo(args);
             }
-
+            else if (args[0] == "Sort")
+            {
+                ClearAllInventories(Me.CubeGrid, Me.CubeGrid, null);
+            }
         }
 
         void Main(string arguments)
