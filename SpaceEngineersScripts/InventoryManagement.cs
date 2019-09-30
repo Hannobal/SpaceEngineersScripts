@@ -102,6 +102,7 @@ namespace Scripts
         string materialText = "";
         string componentText = "";
         string ammoText = "";
+        string otherItemsText = "";
         string systemText = "";
         string debugText = "";
 
@@ -218,16 +219,10 @@ namespace Scripts
         void ClearGlobalInventory()
         {
             globalInventory.Clear();
-            // we only clear the amounts
-            //foreach(var kvp in globalInventory)
-            //{
-            //    foreach(var kvp2 in kvp.Value)
-            //    {
-            //        kvp2.Value.totalAmount = 0;
-            //        kvp2.Value.targetAmount = 0;
-            //        kvp2.Value.ratio = 0f;
-            //    }
-            //}
+            globalInventory.Add(oreType, new Dictionary<string, InventorySlot>());
+            globalInventory.Add(ingotType, new Dictionary<string, InventorySlot>());
+            globalInventory.Add(componentType, new Dictionary<string, InventorySlot>());
+            globalInventory.Add(ammoType, new Dictionary<string, InventorySlot>());
         }
 
         bool CheckGlobalInventorySlot(
@@ -275,19 +270,31 @@ namespace Scripts
         void UpdateTextPanels()
         {
             foreach (IMyTextPanel panel in textPanels) {
-                if (panel.CustomName.Contains("Material"))
-                {
-                    panel.WriteText(materialText);
-                }
-                else if (panel.CustomName.Contains("Component"))
-                    panel.WriteText(componentText);
-                else if (panel.CustomName.Contains("Ammo")
-                    || panel.CustomName.Contains("Ammunition"))
-                    panel.WriteText(ammoText);
-                else if (panel.CustomName.Contains("Debug"))
-                    panel.WriteText(debugText);
-                else
-                    panel.WriteText(systemText);
+                string lowerName = panel.CustomName.ToLower();
+                string panelText = "";
+                if (lowerName.Contains("material"))
+                    panelText += materialText;
+
+                if (lowerName.Contains("component"))
+                    panelText += componentText;
+
+                if (lowerName.Contains("ammo")
+                    || lowerName.Contains("ammunition"))
+                    panelText += ammoText;
+
+                if (lowerName.Contains("other")
+                    || lowerName.Contains("ammunition"))
+                    panelText += otherItemsText;
+
+                if (lowerName.Contains("debug"))
+                    panelText += debugText;
+
+                if (lowerName.Contains("system"))
+                    panelText += systemText;
+
+                panel.WriteText(panelText);
+                panel.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
+                panel.Font = "Monospace";
             }
         }
 
@@ -340,7 +347,6 @@ namespace Scripts
             materialText = String.Format("{0,-10}{1,8}{2,9}\n", "Material", "Ore ", "Refined ");
             foreach (string key in availableMaterials)
             {
-
                 materialText += String.Format("{0,-10}{1,8}{2,9} {3,6}\n",
                     key,
                     FormatNumber((float)globalInventory[oreType][key].TotalAmount),
@@ -349,6 +355,44 @@ namespace Scripts
             }
             if (autoRefineryMaterial != "")
                 materialText += "Automatic refineries processing " + autoRefineryMaterial +"\n";
+            materialText += "\n";
+        }
+
+        void UpdateInventoryTexts()
+        {
+            string format = "{0,-20}{1,8}{2,8}\n";
+            componentText = String.Format(format, "Component", "Amount", "Ratio"); ;
+            ammoText = String.Format(format, "Ammunition", "Amount", "Ratio"); ;
+            otherItemsText = String.Format(format, "Other items", "Amount", "Ratio"); ;
+            foreach (var kvp in globalInventory)
+            {
+                if (kvp.Key == ingotType || kvp.Key == oreType)
+                    continue;
+                else if (kvp.Key == componentType)
+                    AddInventoryText(kvp.Value, format, ref componentText);
+                else if (kvp.Key == ammoType)
+                    AddInventoryText(kvp.Value, format, ref ammoText);
+                else
+                    AddInventoryText(kvp.Value, format, ref otherItemsText);
+            }
+            componentText += "\n";
+            ammoText += "\n";
+            otherItemsText += "\n";
+        }
+
+        void AddInventoryText(
+            Dictionary<string,InventorySlot> inv,
+            string format,
+            ref string text)
+        {
+            SortedSet<string> keys = new SortedSet<string>(inv.Keys);
+            foreach (var key in keys)
+            {
+                text += String.Format(format,
+                    key,
+                    FormatNumber((float)inv[key].TotalAmount),
+                    FormatNumber(inv[key].Ratio));
+            }
         }
 
         void UpdateInventory()
@@ -720,6 +764,7 @@ namespace Scripts
                 FillRefineries();
 
             UpdateMaterialText();
+            UpdateInventoryTexts();
             UpdateTextPanels();
         }
 
