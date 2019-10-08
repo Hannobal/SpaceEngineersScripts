@@ -1,6 +1,7 @@
 ﻿#region pre_script
 
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using VRageMath;
 using VRage.Game;
@@ -114,7 +115,8 @@ namespace Scripts
         Dictionary<IMyCubeGrid, List<CargoContainer>> cargoContainers
             = new Dictionary<IMyCubeGrid, List<CargoContainer>>();
         List<IMyRefinery> autoRefineries = new List<IMyRefinery>();
-        List<IMyAssembler> assemblers = new List<IMyAssembler>();
+        List<IMyAssembler> allAssemblers = new List<IMyAssembler>();
+        List<IMyAssembler> autoAssemblers = new List<IMyAssembler>();
         SortedSet<string> availableMaterials = new SortedSet<string>();
 
         // splits a string by whitespace except for parts in double quotes
@@ -314,10 +316,16 @@ namespace Scripts
             GridTerminalSystem.GetBlocksOfType<IMyRefinery>(autoRefineries,
                 x => x.CubeGrid == Me.CubeGrid && x.CustomName.Contains("Auto")
             );
-            assemblers.Clear();
-            GridTerminalSystem.GetBlocksOfType<IMyAssembler>(assemblers,
+            allAssemblers.Clear();
+            GridTerminalSystem.GetBlocksOfType<IMyAssembler>(allAssemblers,
                 x => x.CubeGrid == Me.CubeGrid
             );
+            autoAssemblers.Clear();
+            foreach(IMyAssembler assembler in allAssemblers)
+            {
+                if (!assembler.CustomName.Contains("Auto")) continue;
+                autoAssemblers.Add(assembler);
+            }
 
             textPanels.Clear();
             GridTerminalSystem.GetBlocksOfType<IMyTextPanel>(textPanels,
@@ -601,7 +609,7 @@ namespace Scripts
 
         void ClearAssemblers()
         {
-            foreach (IMyAssembler assembler in assemblers)
+            foreach (IMyAssembler assembler in allAssemblers)
                 ClearAssembler(assembler);
         }
         void ClearAssembler(IMyAssembler assembler)
@@ -610,6 +618,64 @@ namespace Scripts
             if (!clearIngotsFromIdleAssemblers) return;
             if (assembler.IsProducing) return;
             ClearInventory(assembler.InputInventory, assembler.CubeGrid);
+        }
+
+        void UpdateProduction()
+        {
+            // update production list:
+            Dictionary<string, VRage.MyFixedPoint> inProduction =
+                new Dictionary<string, VRage.MyFixedPoint>();
+            foreach(IMyAssembler assembler in autoAssemblers)
+            {
+                List<MyProductionItem> items = new List<MyProductionItem>();
+                assembler.GetQueue(items);
+                foreach (MyProductionItem item in items)
+                {
+                    if (!inProduction.ContainsKey(item.BlueprintId.SubtypeName))
+                        inProduction.Add(item.BlueprintId.SubtypeName, item.Amount);
+                    else
+                        inProduction[item.BlueprintId.SubtypeName] += item.Amount;
+                }
+            }
+
+            // find which is needed:
+            Dictionary<string, InventorySlot> missingTypes = new Dictionary<string, InventorySlot>();
+            foreach (var kvp in globalInventory[componentType])
+            {
+                if (kvp.Value.TargetAmount <= 0) continue;
+                InventorySlot slot = new InventorySlot();
+                slot.AddAmount(kvp.Value.TotalAmount);
+                slot.AddTargetAmount(kvp.Value.TargetAmount);
+                if (inProduction.ContainsKey(kvp.Key))
+                    slot.AddAmount(inProduction[kvp.Key]);
+                if (slot.TotalAmount >= slot.TargetAmount) continue;
+                missingTypes.Add(kvp.Key, slot);
+            }
+
+            // now add to production
+            foreach (var kvp in missingTypes.OrderBy(p => p.Value.Ratio))
+            {
+                debugText += String.Format("{0:-15} {1:0.000000}\n", kvp.Key,kvp.Value.Ratio);
+                // doesn't work out of the box (throws "not set to an instance of an object") exception
+                MyDefinitionId blueprint = MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + kvp.Key);
+                //new MyItemType(componentType, kvp.Key);
+                try
+                {
+                    autoAssemblers[0].AddQueueItem(blueprint, kvp.Value.TargetAmount - kvp.Value.TotalAmount);
+                } catch
+                {
+                    try
+                    {
+                        blueprint = MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + kvp.Key+"Component");
+                        autoAssemblers[0].AddQueueItem(blueprint, kvp.Value.TargetAmount - kvp.Value.TotalAmount);
+                    }
+                    catch
+                    {
+                        debugText += ("MyObjectBuilder_BlueprintDefinition/" + kvp.Key + "Component\n");
+                    }
+                }
+                
+            }
         }
 
         void FillRefineries()
@@ -761,7 +827,10 @@ namespace Scripts
             UpdateInventory();
 
             if (clearRefinereiesCounter == 0)
+            {
                 FillRefineries();
+                UpdateProduction();
+            }
 
             UpdateMaterialText();
             UpdateInventoryTexts();
