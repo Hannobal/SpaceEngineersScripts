@@ -23,19 +23,51 @@ namespace Scripts
 
         VRage.MyFixedPoint maxAutoRefineryOreAmount = 10000;
 
-        readonly int listUpdateFrequency = 10;
-        readonly int clearRefinereiesFrequency = 5;
-        readonly int clearAssemblersFrequency = 10;
-        readonly bool clearIngotsFromIdleAssemblers = true;
+        readonly List<int> updateEvery = new List<int>()
+        {
+            10, // for block lists
+            25, // for clearing/updating refineries and assemblers
+            10  // for clearing items from assemblers
+        };
+
+        static readonly int blockListUpdateEvery = 10;   // update block lists
+        static readonly int updateRefinereiesEvery = 25; // clear refineries
+        static readonly int clearAssemblersEvery = 10;   // remove components from assemblers
+        static readonly int updateAssemblersEvery = 10;  // update production in assemblers
+        static readonly int sortItemsEvery = 10;         // move all items from other inventories
 
         /**********************************************************************
          * END OF CUSTOMIZATION SECTION
          *********************************************************************/
-        
+
         static readonly string oreType = "MyObjectBuilder_Ore";
         static readonly string ingotType = "MyObjectBuilder_Ingot";
         static readonly string componentType = "MyObjectBuilder_Component";
         static readonly string ammoType = "MyObjectBuilder_AmmoMagazine";
+
+        class Counter
+        {
+            public Counter(int updateEvery)
+            {
+                maxCtr = updateEvery;
+            }
+            public void Increment()
+            {
+                if (maxCtr < 0) return;
+                counter = ++counter % maxCtr;
+            }
+
+            public int Value
+            {
+                get
+                {
+                    return counter;
+                }
+            }
+
+            private int counter = -1;
+            private readonly int maxCtr = -1;
+        }
 
         class ItemInInventory
         {
@@ -73,7 +105,7 @@ namespace Scripts
                     if (targetAmount > 0)
                         return (float)totalAmount / (float)targetAmount;
                     else
-                        return 1.0f;
+                        return -1.0f;
                 }
             }
             public void Clear()
@@ -107,9 +139,18 @@ namespace Scripts
         string systemText = "";
         string debugText = "";
 
-        int listUpdateCounter = 0;
-        int clearRefinereiesCounter = 0;
-        int clearAssemblersCounter = 0;
+
+        Counter ctrBlockListUpdate = new Counter(blockListUpdateEvery);
+        Counter ctrUpdateRefineries = new Counter(updateRefinereiesEvery);
+        Counter ctrClearAssemblers = new Counter(clearAssemblersEvery);
+        Counter ctrUpdateAssemblers = new Counter(updateAssemblersEvery);
+        Counter ctrSortItems = new Counter(sortItemsEvery);
+        Counter ctrSpinner = new Counter(4);
+
+        readonly List<string> spinner = new List<string>()
+        {
+            "--", "\\","|", "/"
+        };
 
         List<IMyTextPanel> textPanels = new List<IMyTextPanel>();
         Dictionary<IMyCubeGrid, List<CargoContainer>> cargoContainers
@@ -134,8 +175,10 @@ namespace Scripts
             return Parts;
         }
 
-        string FormatNumber(float num)
+        string FormatNumber(float num, bool leZeroIsDash=false)
         {
+            if (num <= 0 && leZeroIsDash)
+                return "-- ";
             if(num < 1e3f)
                 return String.Format("{0:0.00} ", num);
             else if (num < 1e6f)
@@ -295,6 +338,11 @@ namespace Scripts
                     panelText += systemText;
 
                 panel.WriteText(panelText);
+                int numLines = panelText.Split('\n').Length;
+                if (numLines > 18)
+                    panel.FontSize = 18.0f / (float)numLines;
+                else
+                    panel.FontSize = 1.0f;
                 panel.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
                 panel.Font = "Monospace";
             }
@@ -355,14 +403,14 @@ namespace Scripts
 
         void UpdateMaterialText()
         {
-            materialText = String.Format("{0,-10}{1,8}{2,9}\n", "Material", "Ore ", "Refined ");
+            materialText = String.Format("{0,-10}{1,8}{2,9}{3,8}\n", "Material", "Ore ", "Refined", "Ratio");
             foreach (string key in availableMaterials)
             {
-                materialText += String.Format("{0,-10}{1,8}{2,9} {3,6}\n",
+                materialText += String.Format("{0,-10}{1,8}{2,9} {3,8}\n",
                     key,
                     FormatNumber((float)globalInventory[oreType][key].TotalAmount),
                     FormatNumber((float)globalInventory[ingotType][key].TotalAmount),
-                    FormatNumber(globalInventory[ingotType][key].Ratio));
+                    FormatNumber(globalInventory[ingotType][key].Ratio,true));
             }
             if (autoRefineryMaterial != "")
                 materialText += "Automatic refineries processing " + autoRefineryMaterial +"\n";
@@ -371,10 +419,10 @@ namespace Scripts
 
         void UpdateInventoryTexts()
         {
-            string format = "{0,-20}{1,8}{2,8}\n";
-            componentText = String.Format(format, "Component", "Amount", "Ratio"); ;
-            ammoText = String.Format(format, "Ammunition", "Amount", "Ratio"); ;
-            otherItemsText = String.Format(format, "Other items", "Amount", "Ratio"); ;
+            string format = "{0,-20}{1,8}{2,8}{3,8}\n";
+            componentText = String.Format(format, "Component", "Amount", "Target", "Ratio");
+            ammoText = String.Format(format, "Ammunition", "Amount", "Target", "Ratio");
+            otherItemsText = String.Format(format, "Other items", "Amount", "Target", "Ratio");
             foreach (var kvp in globalInventory)
             {
                 if (kvp.Key == ingotType || kvp.Key == oreType)
@@ -404,7 +452,8 @@ namespace Scripts
                 text += String.Format(format,
                     key,
                     FormatNumber((float)inv[key].TotalAmount),
-                    FormatNumber(inv[key].Ratio));
+                    FormatNumber((float)inv[key].TargetAmount,true),
+                    FormatNumber(inv[key].Ratio, true));
             }
         }
 
@@ -620,7 +669,6 @@ namespace Scripts
         void ClearAssembler(IMyAssembler assembler)
         {
             ClearInventory(assembler.OutputInventory, assembler.CubeGrid);
-            if (!clearIngotsFromIdleAssemblers) return;
             if (assembler.IsProducing) return;
             ClearInventory(assembler.InputInventory, assembler.CubeGrid);
         }
@@ -656,10 +704,10 @@ namespace Scripts
                 = new Dictionary<string, InventorySlot>();
 
             foreach (var kvp in globalInventory[componentType])
-                if (kvp.Value.TargetAmount != 0 && kvp.Value.TargetAmount > kvp.Value.TotalAmount)
+                if (kvp.Value.TargetAmount > 0 && kvp.Value.TargetAmount > kvp.Value.TotalAmount)
                     missingItems.Add(kvp.Key, kvp.Value);
             foreach (var kvp in globalInventory[ammoType])
-                if (kvp.Value.TargetAmount != 0 && kvp.Value.TargetAmount > kvp.Value.TotalAmount)
+                if (kvp.Value.TargetAmount > 0 && kvp.Value.TargetAmount > kvp.Value.TotalAmount)
                     missingItems.Add(kvp.Key, kvp.Value);
 
             debugText += "missing items: " + missingItems.Count.ToString() + "\n";
@@ -811,36 +859,43 @@ namespace Scripts
 
         void IncrementCounters()
         {
-            listUpdateCounter = (++listUpdateCounter % listUpdateFrequency);
-            clearRefinereiesCounter = (++clearRefinereiesCounter % clearRefinereiesFrequency);
-            clearAssemblersCounter = (++clearAssemblersCounter % clearAssemblersFrequency);
+            ctrBlockListUpdate.Increment();
+            ctrClearAssemblers.Increment();
+            ctrUpdateAssemblers.Increment();
+            ctrUpdateRefineries.Increment();
+            ctrSortItems.Increment();
+            ctrSpinner.Increment();
         }
 
         void Update()
         {
-            if (listUpdateCounter == 0)
+            IncrementCounters();
+
+            Echo(spinner[ctrSpinner.Value]);
+            if (ctrBlockListUpdate.Value == 0)
                 RebuildBlockLists();
 
-            if (clearRefinereiesCounter == 0)
+            if (ctrUpdateRefineries.Value == 0)
                 ClearRefineries();
 
-            if (clearAssemblersCounter == 0)
+            if (ctrClearAssemblers.Value == 0)
                 ClearAssemblers();
+
+            if (ctrSortItems.Value == 0)
+                ClearAllInventories(Me.CubeGrid, Me.CubeGrid, null);
 
             UpdateInventory();
 
-            Echo(clearRefinereiesCounter.ToString());
-            if (clearRefinereiesCounter == 0)
-            {
+            if (ctrUpdateRefineries.Value == 0)
                 FillRefineries();
+
+            if (ctrUpdateAssemblers.Value == 0)
                 UpdateProduction();
-            }
 
             UpdateMaterialText();
             UpdateInventoryTexts();
             UpdateTextPanels();
 
-            IncrementCounters();
         }
 
         void ParseArguments(string arguments)
