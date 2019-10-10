@@ -24,7 +24,7 @@ namespace Scripts
         VRage.MyFixedPoint maxAutoRefineryOreAmount = 10000;
 
         readonly int listUpdateFrequency = 10;
-        readonly int clearRefinereiesFrequency = 1;
+        readonly int clearRefinereiesFrequency = 5;
         readonly int clearAssemblersFrequency = 10;
         readonly bool clearIngotsFromIdleAssemblers = true;
 
@@ -314,7 +314,9 @@ namespace Scripts
 
             autoRefineries.Clear();
             GridTerminalSystem.GetBlocksOfType<IMyRefinery>(autoRefineries,
-                x => x.CubeGrid == Me.CubeGrid && x.CustomName.Contains("Auto")
+                x => x.CubeGrid == Me.CubeGrid
+                && x.CustomName.Contains("Auto")
+                && x.IsWorking
             );
             allAssemblers.Clear();
             GridTerminalSystem.GetBlocksOfType<IMyAssembler>(allAssemblers,
@@ -324,6 +326,7 @@ namespace Scripts
             foreach(IMyAssembler assembler in allAssemblers)
             {
                 if (!assembler.CustomName.Contains("Auto")) continue;
+                if (!assembler.IsWorking) continue;
                 autoAssemblers.Add(assembler);
             }
 
@@ -381,7 +384,9 @@ namespace Scripts
                 else if (kvp.Key == ammoType)
                     AddInventoryText(kvp.Value, format, ref ammoText);
                 else
+                {
                     AddInventoryText(kvp.Value, format, ref otherItemsText);
+                }
             }
             componentText += "\n";
             ammoText += "\n";
@@ -456,7 +461,7 @@ namespace Scripts
                         type = ingotType;
                     else if (lowerWord.Contains("component"))
                         type = componentType;
-                    else if (lowerWord.Contains("ammo"))
+                    else if (lowerWord.Contains("ammunition"))
                         type = ammoType;
                     else
                         type = words[0];
@@ -620,61 +625,55 @@ namespace Scripts
             ClearInventory(assembler.InputInventory, assembler.CubeGrid);
         }
 
+        bool TryAddToQueue(string type, VRage.MyFixedPoint amount)
+        {
+            try
+            {
+                MyDefinitionId blueprint = MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + type);
+                autoAssemblers[0].AddQueueItem(blueprint, amount);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         void UpdateProduction()
         {
-            // update production list:
-            Dictionary<string, VRage.MyFixedPoint> inProduction =
-                new Dictionary<string, VRage.MyFixedPoint>();
-            foreach(IMyAssembler assembler in autoAssemblers)
-            {
-                List<MyProductionItem> items = new List<MyProductionItem>();
-                assembler.GetQueue(items);
-                foreach (MyProductionItem item in items)
-                {
-                    if (!inProduction.ContainsKey(item.BlueprintId.SubtypeName))
-                        inProduction.Add(item.BlueprintId.SubtypeName, item.Amount);
-                    else
-                        inProduction[item.BlueprintId.SubtypeName] += item.Amount;
-                }
-            }
+            debugText = "";
+            if (autoAssemblers.Count == 0) return;
 
-            // find which is needed:
-            Dictionary<string, InventorySlot> missingTypes = new Dictionary<string, InventorySlot>();
+            // clear all queues
+            foreach (IMyAssembler assembler in autoAssemblers)
+            {
+                assembler.ClearQueue();
+                assembler.CooperativeMode = true;
+            }
+            autoAssemblers[0].CooperativeMode = false;
+
+            Dictionary<string, InventorySlot> missingItems
+                = new Dictionary<string, InventorySlot>();
+
             foreach (var kvp in globalInventory[componentType])
-            {
-                if (kvp.Value.TargetAmount <= 0) continue;
-                InventorySlot slot = new InventorySlot();
-                slot.AddAmount(kvp.Value.TotalAmount);
-                slot.AddTargetAmount(kvp.Value.TargetAmount);
-                if (inProduction.ContainsKey(kvp.Key))
-                    slot.AddAmount(inProduction[kvp.Key]);
-                if (slot.TotalAmount >= slot.TargetAmount) continue;
-                missingTypes.Add(kvp.Key, slot);
-            }
+                if (kvp.Value.TargetAmount != 0 && kvp.Value.TargetAmount > kvp.Value.TotalAmount)
+                    missingItems.Add(kvp.Key, kvp.Value);
+            foreach (var kvp in globalInventory[ammoType])
+                if (kvp.Value.TargetAmount != 0 && kvp.Value.TargetAmount > kvp.Value.TotalAmount)
+                    missingItems.Add(kvp.Key, kvp.Value);
 
+            debugText += "missing items: " + missingItems.Count.ToString() + "\n";
             // now add to production
-            foreach (var kvp in missingTypes.OrderBy(p => p.Value.Ratio))
+            foreach (var kvp in missingItems.OrderBy(p => p.Value.Ratio))
             {
-                debugText += String.Format("{0:-15} {1:0.000000}\n", kvp.Key,kvp.Value.Ratio);
-                // doesn't work out of the box (throws "not set to an instance of an object") exception
+                debugText += "\n" + kvp.Key;
+                if (kvp.Value.TargetAmount == 0) continue;
                 MyDefinitionId blueprint = MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + kvp.Key);
-                //new MyItemType(componentType, kvp.Key);
-                try
-                {
-                    autoAssemblers[0].AddQueueItem(blueprint, kvp.Value.TargetAmount - kvp.Value.TotalAmount);
-                } catch
-                {
-                    try
-                    {
-                        blueprint = MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + kvp.Key+"Component");
-                        autoAssemblers[0].AddQueueItem(blueprint, kvp.Value.TargetAmount - kvp.Value.TotalAmount);
-                    }
-                    catch
-                    {
-                        debugText += ("MyObjectBuilder_BlueprintDefinition/" + kvp.Key + "Component\n");
-                    }
-                }
-                
+                VRage.MyFixedPoint missingAmount = kvp.Value.TargetAmount - kvp.Value.TotalAmount;
+                if (TryAddToQueue(kvp.Key, missingAmount)) continue;
+                if (TryAddToQueue(kvp.Key+"Component", missingAmount)) continue;
+                if (TryAddToQueue(kvp.Key + "Magazine", missingAmount)) continue;
+                debugText += " MISSING";
             }
         }
 
@@ -810,22 +809,27 @@ namespace Scripts
             Runtime.UpdateFrequency = UpdateFrequency.Update100;
         }
 
-        void Update()
+        void IncrementCounters()
         {
             listUpdateCounter = (++listUpdateCounter % listUpdateFrequency);
+            clearRefinereiesCounter = (++clearRefinereiesCounter % clearRefinereiesFrequency);
+            clearAssemblersCounter = (++clearAssemblersCounter % clearAssemblersFrequency);
+        }
+
+        void Update()
+        {
             if (listUpdateCounter == 0)
                 RebuildBlockLists();
 
-            clearRefinereiesCounter = (++clearRefinereiesCounter % clearRefinereiesFrequency);
             if (clearRefinereiesCounter == 0)
                 ClearRefineries();
 
-            clearAssemblersCounter = (++clearAssemblersCounter % clearAssemblersFrequency);
             if (clearAssemblersCounter == 0)
                 ClearAssemblers();
 
             UpdateInventory();
 
+            Echo(clearRefinereiesCounter.ToString());
             if (clearRefinereiesCounter == 0)
             {
                 FillRefineries();
@@ -835,6 +839,8 @@ namespace Scripts
             UpdateMaterialText();
             UpdateInventoryTexts();
             UpdateTextPanels();
+
+            IncrementCounters();
         }
 
         void ParseArguments(string arguments)
