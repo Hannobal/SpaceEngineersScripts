@@ -128,8 +128,12 @@ namespace Scripts
             }
         };
 
+
         Dictionary<string, Dictionary<string, InventorySlot>> globalInventory =
             new Dictionary<string, Dictionary<string, InventorySlot>>();
+
+        Dictionary<string, Dictionary<string, Dictionary<string, VRage.MyFixedPoint>>> transferLists =
+            new Dictionary<string, Dictionary<string, Dictionary<string, VRage.MyFixedPoint>>>();
 
         string autoRefineryMaterial = "";
         string materialText = "";
@@ -460,18 +464,13 @@ namespace Scripts
         void UpdateInventory()
         {
             ClearGlobalInventory();
-            AddTargetAmountsToGlobalInventory();
+            ParseCustomData();
             List<IMyTerminalBlock> blocks = new List<IMyTerminalBlock>();
             GridTerminalSystem.GetBlocks(blocks);
             foreach (IMyTerminalBlock block in blocks)
             {
                 UpdateInventory(block);
             }
-            //foreach(CargoContainer container in cargoContainers[Me.CubeGrid])
-            //{
-            //    UpdateInventory(container.container);
-            //}
-
         }
 
         void UpdateInventory(IMyTerminalBlock block)
@@ -490,54 +489,87 @@ namespace Scripts
             BuildMaterialsList();
         }
 
-        void AddTargetAmountsToGlobalInventory()
+        void ParseCustomData()
         {
+            debugText = "";
+            transferLists.Clear();
             string[] lines = Me.CustomData.Split(
                 new[] { "\r\n", "\r", "\n" },
                 StringSplitOptions.None
             );
-            string type = "";
+            string type="";
+            string keyword = "";
+            string listName = "";
             for (int lineNo = 0; lineNo < lines.Length; ++lineNo)
             {
-                string line = lines[lineNo].Trim();
-                if (line.Length == 0) continue;
-                if (line[0] == '#') continue;
-                List<string> words = SplitWhitespace(line);
-                if (words.Count == 1)
+                try
                 {
+                    debugText += lines[lineNo] + "  ";
+                    string line = lines[lineNo].Trim();
+                    if (line.Length == 0) continue;
+                    if (line[0] == '#') continue;
+                    List<string> words = SplitWhitespace(line);
                     string lowerWord = words[0].ToLower();
-                    if (lowerWord.Contains("ingot"))
-                        type = ingotType;
-                    else if (lowerWord.Contains("component"))
-                        type = componentType;
-                    else if (lowerWord.Contains("ammunition"))
-                        type = ammoType;
-                    else
-                        type = words[0];
-                }
-                else if (words.Count == 2)
-                {
-                    if (type.Length == 0)
+                    if(lowerWord=="production")
                     {
-                        Echo("syntax error on line " + lineNo.ToString() + " of Custom Data: "
-                            + " No type defined before Subtype");
+                        debugText += "keyword prod\n";
+                        keyword = lowerWord;
+                    }
+                    else if (lowerWord == "list")
+                    {
+                        debugText += "keyword list\n";
+                        if (words.Count < 2)
+                            throw new Exception("Missing list name");
+                        keyword = lowerWord;
+                        listName = words[1];
+                        if (transferLists.ContainsKey(listName))
+                            debugText = "CustomData contains multiple definitions of list "
+                                + listName;
+                        else
+                            transferLists.Add(listName,
+                                new Dictionary<string, Dictionary<string, VRage.MyFixedPoint>>());
+                    }
+                    else if (words.Count==1)
+                    {
+                        debugText += "type  ";
+                        if (lowerWord.Contains("ingot"))
+                            type = ingotType;
+                        else if (lowerWord.Contains("component"))
+                            type = componentType;
+                        else if (lowerWord.Contains("ammunition") || type.Contains("ammo"))
+                            type = ammoType;
+                        else
+                            type = words[0];
+                        debugText += type+"\n";
                     }
                     else
                     {
+                        if (keyword.Length == 0)
+                            throw new Exception("No keyword defined before subtype+Amount pair");
+                        if (type.Length == 0)
+                            throw new Exception("No type defined before subtype+Amount pair");
                         int amount;
-                        if (int.TryParse(words[1], out amount)) {
+                        if (!int.TryParse(words[1], out amount))
+                            throw new Exception("Cannot parse amount for " + words[0] + " from " + words[1]);
+
+                        debugText += "general "+amount.ToString()+"\n";
+                        if (keyword=="production")
                             AddToGlobalInventory(type, words[0], amount);
-                        }
                         else
                         {
-                            Echo("syntax error on line " + lineNo.ToString() + " of Custom Data" +
-                                "Could not parse " + words[1] + " as integer");
+                            if (!transferLists[listName].ContainsKey(type))
+                                transferLists[listName].Add(type, new Dictionary<string, VRage.MyFixedPoint>());
+                            if (!transferLists[listName][type].ContainsKey(words[0]))
+                                transferLists[listName][type].Add(words[0], new VRage.MyFixedPoint());
+                            transferLists[listName][type][words[0]] += amount;
                         }
                     }
+
                 }
-                else
+                catch (Exception ex)
                 {
-                    Echo("syntax error on line " + lineNo.ToString() + " of Custom Data");
+                    Echo("error on line " + (lineNo+1).ToString() + " of Custom Data: "+ex.Message);
+
                 }
             }
         }
@@ -689,7 +721,6 @@ namespace Scripts
 
         void UpdateProduction()
         {
-            debugText = "";
             if (autoAssemblers.Count == 0) return;
 
             // clear all queues
@@ -710,18 +741,15 @@ namespace Scripts
                 if (kvp.Value.TargetAmount > 0 && kvp.Value.TargetAmount > kvp.Value.TotalAmount)
                     missingItems.Add(kvp.Key, kvp.Value);
 
-            debugText += "missing items: " + missingItems.Count.ToString() + "\n";
             // now add to production
             foreach (var kvp in missingItems.OrderBy(p => p.Value.Ratio))
             {
-                debugText += "\n" + kvp.Key;
                 if (kvp.Value.TargetAmount == 0) continue;
                 MyDefinitionId blueprint = MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + kvp.Key);
                 VRage.MyFixedPoint missingAmount = kvp.Value.TargetAmount - kvp.Value.TotalAmount;
                 if (TryAddToQueue(kvp.Key, missingAmount)) continue;
                 if (TryAddToQueue(kvp.Key+"Component", missingAmount)) continue;
                 if (TryAddToQueue(kvp.Key + "Magazine", missingAmount)) continue;
-                debugText += " MISSING";
             }
         }
 
